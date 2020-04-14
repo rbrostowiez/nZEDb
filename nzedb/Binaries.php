@@ -869,6 +869,9 @@ class Binaries
 	 */
 	protected function storeHeaders(array $headers, $multiGroup)
 	{
+
+
+
 		$this->multiGroup = $multiGroup;
 		$binariesUpdate = $collectionIDs = $articles = [];
 
@@ -876,6 +879,31 @@ class Binaries
 
 		$partsQuery = $partsCheck =
 			"INSERT IGNORE INTO {$this->tableNames['pname']} (binaries_id, number, messageid, partnumber, size) VALUES ";
+
+		$cNameQuery = <<< __SQL__
+INSERT INTO {$this->tableNames['cname']} 
+	(subject, fromname, date, xref, groups_id,
+		totalfiles, collectionhash, collection_regexes_id, dateadded)
+VALUES 
+	(?, ?, FROM_UNIXTIME(?), ?, ?, ?, ?, ?, NOW())
+ON DUPLICATE KEY UPDATE 
+	xref = IF(?, SUBSTRING(CONCAT(xref, "\\n"? ), 1, 4096), xref), 
+	dateadded = NOW(), 
+	noise = ?
+__SQL__;
+
+		$bNameQuery = <<< __SQL__
+INSERT INTO {$this->tableNames['bname']}
+	(binaryhash, name, collections_id, totalparts, currentparts, filenumber, partsize)
+VALUES 
+	(UNHEX(?), ?, ?, ?, 1, ?, ?)
+ON DUPLICATE KEY UPDATE 
+	currentparts = currentparts + 1, 
+	partsize = partsize + ?
+__SQL__;
+
+		$cNameStmt = $this->_pdo->Prepare($cNameQuery);
+		$bNameStmt = $this->_pdo->Prepare($bNameQuery);
 
 		// Loop articles, figure out files/parts.
 		foreach ($headers as $this->header)
@@ -938,27 +966,41 @@ class Binaries
 						$timestamp = $now;
 					}
 
-					$xref = ($this->multiGroup === true ? sprintf('xref = CONCAT(xref, "\\n"%s ),', $this->_pdo->escapeString(substr($this->header['Xref'], 2, 255))) : '');
+					$cNameStmt->execute([
+						$this->_pdo->escapeString(substr(utf8_encode($this->header['matches'][1]), 0, 255)),
+						$this->_pdo->escapeString(utf8_encode($this->header['From'])),
+						$timestamp,
+						$this->_pdo->escapeString(substr($this->header['Xref'], 0, 255)),
+						$this->groupMySQL['id'],
+						$fileCount[3],
+						sha1($this->header['CollectionKey']),
+						$collMatch['id'],
+						$this->multiGroup === true,
+						substr($this->header['Xref'], 2, 255),
+						bin2hex(openssl_random_pseudo_bytes(16))
+					]);
 
-					$collectionID = $this->_pdo->queryInsert(
-						sprintf("
-							INSERT INTO %s (subject, fromname, date, xref, groups_id,
-								totalfiles, collectionhash, collection_regexes_id, dateadded)
-							VALUES (%s, %s, FROM_UNIXTIME(%s), %s, %d, %d, '%s', %d, NOW())
-							ON DUPLICATE KEY UPDATE %s dateadded = NOW(), noise = '%s'",
-							$this->tableNames['cname'],
-							$this->_pdo->escapeString(substr(utf8_encode($this->header['matches'][1]), 0, 255)),
-							$this->_pdo->escapeString(utf8_encode($this->header['From'])),
-							$timestamp,
-							$this->_pdo->escapeString(substr($this->header['Xref'], 0, 255)),
-							$this->groupMySQL['id'],
-							$fileCount[3],
-							sha1($this->header['CollectionKey']),
-							$collMatch['id'],
-							$xref,
-							bin2hex(openssl_random_pseudo_bytes(16))
-						)
-					);
+					$collectionID = $this->_pdo->lastInsertId();
+
+//					$collectionID = $this->_pdo->queryInsert(
+//						sprintf("
+//							INSERT INTO %s (subject, fromname, date, xref, groups_id,
+//								totalfiles, collectionhash, collection_regexes_id, dateadded)
+//							VALUES (%s, %s, FROM_UNIXTIME(%s), %s, %d, %d, '%s', %d, NOW())
+//							ON DUPLICATE KEY UPDATE %s dateadded = NOW(), noise = '%s'",
+//							$this->tableNames['cname'],
+//							$this->_pdo->escapeString(substr(utf8_encode($this->header['matches'][1]), 0, 255)),
+//							$this->_pdo->escapeString(utf8_encode($this->header['From'])),
+//							$timestamp,
+//							$this->_pdo->escapeString(substr($this->header['Xref'], 0, 255)),
+//							$this->groupMySQL['id'],
+//							$fileCount[3],
+//							sha1($this->header['CollectionKey']),
+//							$collMatch['id'],
+//							$xref,
+//							bin2hex(openssl_random_pseudo_bytes(16))
+//						)
+//					);
 
 					if ($collectionID === false) {
 						if ($this->addToPartRepair) {
@@ -976,21 +1018,33 @@ class Binaries
 				// MGR or Standard, Binary Hash should be unique to the group
 				$hash = md5($this->header['matches'][1] . $this->header['From'] . $this->groupMySQL['id']);
 
-				$binaryID = $this->_pdo->queryInsert(
-					sprintf("
-						INSERT INTO %s (binaryhash, name, collections_id, totalparts, currentparts, filenumber, partsize)
-						VALUES (UNHEX('%s'), %s, %d, %d, 1, %d, %d)
-						ON DUPLICATE KEY UPDATE currentparts = currentparts + 1, partsize = partsize + %d",
-						$this->tableNames['bname'],
-						$hash,
-						$this->_pdo->escapeString(utf8_encode($this->header['matches'][1])),
-						$collectionID,
-						$this->header['matches'][3],
-						$fileCount[1],
-						$this->header['Bytes'],
-						$this->header['Bytes']
-					)
-				);
+				$bNameStmt->execute([
+					$hash,
+					$this->_pdo->escapeString(utf8_encode($this->header['matches'][1])),
+					$collectionID,
+					$this->header['matches'][3],
+					$fileCount[1],
+					$this->header['Bytes'],
+					$this->header['Bytes']
+				]);
+
+				$binaryID = $this->_pdo->lastInsertId();
+
+//				$binaryID = $this->_pdo->queryInsert(
+//					sprintf("
+//						INSERT INTO %s (binaryhash, name, collections_id, totalparts, currentparts, filenumber, partsize)
+//						VALUES (UNHEX('%s'), %s, %d, %d, 1, %d, %d)
+//						ON DUPLICATE KEY UPDATE currentparts = currentparts + 1, partsize = partsize + %d",
+//						$this->tableNames['bname'],
+//						$hash,
+//						$this->_pdo->escapeString(utf8_encode($this->header['matches'][1])),
+//						$collectionID,
+//						$this->header['matches'][3],
+//						$fileCount[1],
+//						$this->header['Bytes'],
+//						$this->header['Bytes']
+//					)
+//				);
 
 				if ($binaryID === false) {
 					if ($this->addToPartRepair) {
@@ -1038,7 +1092,7 @@ class Binaries
 		$this->timeCleaning = number_format($this->startUpdate - $this->startCleaning, 2);
 		$binariesQuery = $binariesCheck = sprintf('INSERT INTO %s (id, partsize, currentparts) VALUES ', $this->tableNames['bname']);
 		foreach ($binariesUpdate as $binaryID => $binary) {
-			$binariesQuery .= '(' . $binaryID . ',' . $binary['Size'] . ',' . $binary['Parts'] . '),';
+			$binariesQuery .= "('$binaryID', {$binary['Size']}, {$binary['Parts']})";
 		}
 		$binariesEnd = ' ON DUPLICATE KEY UPDATE partsize = VALUES(partsize) + partsize, currentparts = VALUES(currentparts) + currentparts';
 		$binariesQuery = rtrim($binariesQuery, ',') . $binariesEnd;
